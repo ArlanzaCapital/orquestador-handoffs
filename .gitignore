@@ -1,0 +1,6 @@
+node_modules/
+*-worktrees/
+*-orquestador-runs/
+handoffs/
+.DS_Store
+Thumbs.db

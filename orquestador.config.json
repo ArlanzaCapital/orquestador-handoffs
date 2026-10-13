@@ -1,0 +1,28 @@
+{
+  "carpetaWorktrees": null,
+  "carpetaEjecuciones": null,
+  "commitPolicyPorDefecto": "none",
+  "comandoPreparacion": "npm ci",
+  "comandoTests": "npm test",
+  "timeoutMinutos": {
+    "implementador": 30,
+    "revisor": 15,
+    "investigador": 20,
+    "tests": 10,
+    "preparacion": 15
+  },
+  "claude": {
+    "herramientasExtraImplementador": [
+      "Bash(npm test)",
+      "Bash(npm test *)",
+      "Bash(npm run lint *)",
+      "Bash(npx tsc *)"
+    ],
+    "modelo": null
+  },
+  "codex": {
+    "modelo": null
+  },
+  "maxIteracionesPorDefecto": 2,
+  "maxCaracteresDiffEnPrompt": 120000
+}
