@@ -43,6 +43,8 @@ node C:\herramientas\orquestador\orquestar.mjs handoffs\012\packet.md
 
 Para validar la instalación en tu equipo antes de usarlo en un proyecto real, sigue [`pruebas/PRUEBA-WINDOWS.md`](pruebas/PRUEBA-WINDOWS.md).
 
+¿Primera vez? Lee la [guía](docs/GUIA.md): qué es, cómo trabaja y cómo usarlo bien, con ejemplos.
+
 ## El packet
 
 Cabecera:
