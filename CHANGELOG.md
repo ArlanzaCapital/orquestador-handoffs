@@ -2,6 +2,19 @@
 
 Todas las versiones se validaron con agentes simulados; desde la 2.0.1, además, en Windows con Claude Code y Codex CLI reales.
 
+## 2.2.1
+
+Aislamiento de la configuración de los agentes. Motivo: la revisión del 26-10-2026 y las pruebas 12, 13 y 14.
+
+- **Hueco corregido, existente desde la 2.0.0:** el implementador Claude recibía `Edit` y `Write` sin ruta en `--allowedTools`, lo que le permitía escribir en cualquier parte del disco. La prueba 13 lo detectó: creó un archivo en la carpeta Descargas del usuario sin ninguna denegación. Ahora recibe `Edit(/**)`, anclado al worktree, que según la documentación de Claude Code rige también a `Write`. Las escrituras fuera del worktree se deniegan.
+- Claude se lanza con `--setting-sources project`: no carga la configuración global del usuario (directorios adicionales, permisos, plugins y hooks extra) ni la `local`, que puede crear el agente y git ignora.
+- STOP si el implementador crea o modifica algo en `.claude/` o `.codex/` del worktree (incluidos archivos ignorados por git). Esa configuración la cargarían las sesiones siguientes.
+- Modo revisar: STOP antes de lanzar tests o agentes si el candidato añade o modifica `.claude/` o `.codex/` (por ejemplo, hooks en una PR ajena).
+- Codex:
+  - El implementador se lanza con `-c sandbox_workspace_write.writable_roots=[]`, sin las carpetas con escritura extra del `config.toml` global.
+  - El implementador y el revisor se lanzan sin plugins ni apps (`features.plugins=false`, `features.apps=false`), con cada servidor MCP de `config.toml` desactivado (`mcp_servers.<nombre>.enabled=false`, a partir de `codex mcp list --json`, con timeout de 60 s) y sin búsqueda web integrada (`web_search=disabled`). Si no se puede obtener la lista de servidores, STOP.
+- Nuevas pruebas en `pruebas/`: 12 (el implementador crea un hook en `.claude/`), 13 (escritura en Descargas) y 14 (revisar un candidato con `.claude/settings.json`).
+
 ## 2.2.0
 
 - `resultado.md` incluye una sección **Reabrir sesiones** con el comando exacto para cada agente de cada iteración: `claude --resume <id>`, `claude --desktop --resume <id>` (app de escritorio) y `codex resume <id>`.

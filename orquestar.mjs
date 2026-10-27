@@ -21,13 +21,14 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-const VERSION = '2.2.0';
+const VERSION = '2.2.1';
 const ES_WINDOWS = process.platform === 'win32';
 const DIR_SCRIPT = path.dirname(fileURLToPath(import.meta.url));
 const MOTORES = ['claude', 'codex'];
 const MODOS = ['implementar', 'revisar', 'investigar'];
 const POLITICAS_COMMIT = ['none', 'orchestrator'];
 const ACCIONES = ['pass', 'retry', 'stop'];
+const TIMEOUT_MCP_LIST_MS = 60000;
 
 const MAPA_POR_DEFECTO = {
   PASS: 'pass',
@@ -374,11 +375,40 @@ ${packet}
 
 // ───────────────────────── motores ─────────────────────────
 
-function invocacion(motor, { escritura, rutaSalida, config, sesion }) {
+// Codex no tiene un equivalente a --strict-mcp-config. Se desactivan los plugins y las apps
+// (y con ellos sus servidores MCP) y, uno a uno, los servidores MCP de config.toml.
+// Si no se puede obtener la lista, se para: mejor no lanzar que lanzar con MCP.
+// Va por ejecutar(): timeout que mata el árbol de procesos y respuesta a Ctrl+C.
+async function argsCodexSinMcp(cwd) {
+  const base = ['-c', 'features.plugins=false', '-c', 'features.apps=false'];
+  const r = await ejecutar({
+    cmd: 'codex', args: [...base, 'mcp', 'list', '--json'], cwd,
+    timeoutMs: TIMEOUT_MCP_LIST_MS, etiqueta: 'codex mcp list',
+  });
+  if (interrumpido) throw new Stop(`${MOTIVO_INTERRUPCION} Se estaba consultando codex mcp list.`);
+  if (r.expirado) throw new Stop(`codex mcp list --json no respondió en ${TIMEOUT_MCP_LIST_MS / 1000} s.`);
+  let servidores;
+  try {
+    if (r.codigo !== 0) throw new Error(r.stderr.trim() || `código ${r.codigo}`);
+    servidores = JSON.parse(r.stdout);
+  } catch (e) {
+    throw new Stop(`No se pudo obtener la lista de servidores MCP de Codex (codex mcp list --json): ${e.message}`);
+  }
+  const args = [...base];
+  for (const s of servidores.filter((s) => s.enabled)) {
+    if (!/^[A-Za-z0-9_-]+$/.test(s.name)) throw new Stop(`Servidor MCP de Codex con un nombre que no se puede desactivar desde la línea de comandos: "${s.name}".`);
+    args.push('-c', `mcp_servers.${s.name}.enabled=false`);
+  }
+  return args;
+}
+
+function invocacion(motor, { escritura, rutaSalida, config, sesion, sinMcp }) {
   if (motor === 'claude') {
     const lectura = ['Read', 'Grep', 'Glob', 'Bash(git diff *)', 'Bash(git log *)', 'Bash(git show *)', 'Bash(git status *)'];
     const permitidas = escritura
-      ? [...lectura, 'Edit', 'Write', ...(config.claude.herramientasExtraImplementador || [])]
+      // 'Edit' o 'Write' sin ruta permiten escribir en cualquier ruta del disco.
+      // Edit(/**) se ancla en el directorio de trabajo principal (el worktree) y rige también a Write.
+      ? [...lectura, 'Edit(/**)', ...(config.claude.herramientasExtraImplementador || [])]
       : lectura;
     const prohibidas = escritura
       ? ['Bash(git commit *)', 'Bash(git push *)', 'Bash(git reset *)', 'Bash(git checkout *)', 'Bash(git switch *)', 'Bash(git rebase *)', 'Bash(git merge *)', 'Bash(git add *)', 'Bash(git stash *)', 'WebFetch', 'WebSearch']
@@ -395,6 +425,9 @@ function invocacion(motor, { escritura, rutaSalida, config, sesion }) {
     ];
     // Sin servidores MCP ni conectores: estas llamadas no los necesitan (mínimo privilegio).
     args.push('--strict-mcp-config');
+    // Solo la configuración del proyecto. No se cargan 'user' (configuración global del usuario:
+    // directorios, permisos, plugins y hooks extra) ni 'local' (puede crearla el agente y git la ignora).
+    args.push('--setting-sources', 'project');
     // Identificador fijado por el orquestador para poder reabrir la sesión después.
     args.push('--session-id', sesion.id, '--name', sesion.nombre);
     if (config.claude.modelo) args.push('--model', config.claude.modelo);
@@ -404,6 +437,11 @@ function invocacion(motor, { escritura, rutaSalida, config, sesion }) {
   const args = ['exec', '--sandbox', escritura ? 'workspace-write' : 'read-only', '--output-last-message', rutaSalida];
   // Mínimo privilegio aunque el config.toml global permita red en workspace-write.
   if (escritura) args.push('-c', 'sandbox_workspace_write.network_access=false');
+  // Ídem para las carpetas con escritura extra (writable_roots): solo el worktree.
+  if (escritura) args.push('-c', 'sandbox_workspace_write.writable_roots=[]');
+  // Sin búsqueda web integrada ("disabled" quita la herramienta) ni MCP, también en solo lectura.
+  args.push('-c', 'web_search=disabled');
+  args.push(...sinMcp);
   if (config.codex.modelo) args.push('--model', config.codex.modelo);
   args.push('-'); // el prompt llega por stdin
   return {
@@ -418,7 +456,9 @@ function invocacion(motor, { escritura, rutaSalida, config, sesion }) {
 async function lanzarAgente({ rol, motor, escritura, prompt, ctx, config, prefijo }) {
   const rutaSalida = path.join(ctx.dirRun, `${prefijo}-${rol}.md`);
   const sesion = { id: crypto.randomUUID(), nombre: `orq-${ctx.id}-${prefijo}-${rol}` };
-  const inv = invocacion(motor, { escritura, rutaSalida, config, sesion });
+  comprobarInterrupcion();
+  const sinMcp = motor === 'codex' ? await argsCodexSinMcp(ctx.dirWt) : [];
+  const inv = invocacion(motor, { escritura, rutaSalida, config, sesion, sinMcp });
   if (inv.comandos) {
     prompt += `
 === COMANDOS DE TERMINAL ===
@@ -480,6 +520,16 @@ async function ejecutarShell(etiqueta, linea, ctx, config, rutaSalida) {
   if (interrumpido) throw new Stop(`${MOTIVO_INTERRUPCION} Se estaba ejecutando: ${etiqueta}.`);
   ctx.fase = null;
   return { codigo, texto, sha: sha256(contenido) };
+}
+
+// La configuración de agentes del worktree la cargarían las sesiones siguientes (revisor, iteración 2).
+// Lo que ya venía en el baseline sin cambios no aparece en git status.
+function comprobarConfigAgentes(ctx) {
+  const estado = git(ctx.dirWt, ['status', '--porcelain=v1', '--ignored', '--untracked-files=all', '--', '.claude', '.codex']).out;
+  if (estado) {
+    const rutas = estado.split('\n').map((l) => l.slice(3)).join(', ');
+    throw new Stop(`El implementador creó o modificó configuración de agentes (.claude/ o .codex/): ${rutas}. Esa configuración la cargarían las sesiones siguientes.`);
+  }
 }
 
 // Registra lo que haya hecho el implementador. Devuelve true si el árbol cambió.
@@ -657,6 +707,7 @@ async function flujoImplementar(ctx, config, packet) {
       prompt: promptImplementador(ctx, packet, feedback), ctx, config, prefijo: pre,
     });
     ctx.evidencia.implementacion = impl.sha;
+    comprobarConfigAgentes(ctx);
     const stop = detectarStop(impl.salida);
     if (stop) return { estado: 'STOP', motivo: `El implementador se detuvo: ${stop}`, iter };
 
@@ -700,6 +751,11 @@ async function flujoImplementar(ctx, config, packet) {
 }
 
 async function flujoRevisar(ctx, config, packet) {
+  // El revisor cargaría la configuración project del candidato (p. ej. hooks de una PR ajena).
+  const cambiosConfig = git(ctx.raiz, ['diff', '--name-only', ...ctx.argsDiff, '--', '.claude', '.codex']).out;
+  if (cambiosConfig) {
+    return { estado: 'STOP', motivo: `El candidato añade o modifica configuración de agentes (.claude/ o .codex/): ${cambiosConfig.split('\n').join(', ')}. Revísalo a mano; no se lanza ningún agente sobre él.` };
+  }
   const ev = evidenciaDiff(ctx, config, 'rev');
   ctx.evidencia.diff = ev.sha;
   if (ev.vacio) return { estado: 'STOP', motivo: 'No hay diferencias entre baseline y candidato.' };
